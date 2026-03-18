@@ -1,0 +1,16 @@
+# Source data (sensitive)
+HH_server_privilege/
+server_privilege/
+
+# Merge outputs
+merged_server_privilege.sprv
+sprv_diff_report.txt
+
+# Archives
+*.zip
+
+# PyInstaller
+dist/
+build/
+*.spec
+__pycache__/
