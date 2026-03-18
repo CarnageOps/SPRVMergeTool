@@ -42,7 +42,7 @@ This runs PyInstaller and produces `dist/SPRV_MergeTool.exe` (~10 MB). The exe b
 
 ### File selection
 
-If the tool is run from the `privilege_logs/` directory and both default subfolders exist (`HH_server_privilege/` and `server_privilege/`), it auto-loads them. Otherwise, use the **Browse A / Browse B** buttons or **File > Load File A / Load File B** to pick files manually.
+Use the **Browse A / Browse B** buttons or **File > Load File A / Load File B** to pick your two `.sprv` files.
 
 ## Requirements
 
@@ -53,12 +53,7 @@ If the tool is run from the `privilege_logs/` directory and both default subfold
 ## File structure
 
 ```
-privilege_logs/
-  merge_sprv.py              # Main application
-  build_exe.bat              # One-click exe builder
-  README.md                  # This file
-  HH_server_privilege/       # Source file A (gitignored)
-  server_privilege/           # Source file B
-  merged_server_privilege.sprv  # Output (gitignored)
-  dist/                      # PyInstaller output (gitignored)
+merge_sprv.py              # Main application
+build_exe.bat              # One-click exe builder
+README.md                  # This file
 ```
