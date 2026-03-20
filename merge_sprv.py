@@ -21,7 +21,8 @@ DEFAULT_OUT = SCRIPT_DIR / "merged_server_privilege.sprv"
 # ── Core hashing / loading ────────────────────────────────────────────────────
 
 def entry_hash(entry: dict) -> str:
-    canonical = json.dumps(entry, sort_keys=True, separators=(",", ":"))
+    filtered = {k: v for k, v in entry.items() if k != "bbmeta"}
+    canonical = json.dumps(filtered, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -40,6 +41,7 @@ class SectionDiff:
     common: set[str] = field(default_factory=set)
     only_a: set[str] = field(default_factory=set)
     only_b: set[str] = field(default_factory=set)
+    aggregated: dict[str, dict] = field(default_factory=dict)
 
 
 def build_hash_table(entries: list[dict]) -> dict[str, dict]:
@@ -63,6 +65,80 @@ def compute_diff(list_a: list[dict], list_b: list[dict]) -> SectionDiff:
     )
 
 
+def _build_id_index(entries: list[dict], id_key: str) -> dict[int, list[dict]]:
+    """Group entries by their identity key (e.g. 'banned id')."""
+    index: dict[int, list[dict]] = {}
+    for e in entries:
+        k = e.get(id_key)
+        if k is not None:
+            index.setdefault(k, []).append(e)
+    return index
+
+
+def _aggregate_ban(a: dict, b: dict) -> dict:
+    """Combine two ban records for the same banned id, summing times banned."""
+    return {
+        "banned id": a["banned id"],
+        "last moderator id": max(a.get("last moderator id", 0),
+                                  b.get("last moderator id", 0)),
+        "unban time point": max(a.get("unban time point", 0),
+                                 b.get("unban time point", 0)),
+        "times banned": a.get("times banned", 0) + b.get("times banned", 0),
+        "ban type": a.get("ban type", b.get("ban type", "")),
+    }
+
+
+def compute_bans_diff(list_a: list[dict], list_b: list[dict]) -> SectionDiff:
+    """Like compute_diff but also detects same banned id across files and aggregates."""
+    ha = build_hash_table(list_a)
+    hb = build_hash_table(list_b)
+    keys_a = set(ha.keys())
+    keys_b = set(hb.keys())
+    exact_common = keys_a & keys_b
+
+    idx_a = _build_id_index(list_a, "banned id")
+    idx_b = _build_id_index(list_b, "banned id")
+    shared_ids = set(idx_a.keys()) & set(idx_b.keys())
+
+    exact_common_banned_ids: set[int] = set()
+    for h in exact_common:
+        entry = ha[h]
+        bid = entry.get("banned id")
+        if bid is not None:
+            exact_common_banned_ids.add(bid)
+
+    aggregated: dict[str, dict] = {}
+    consumed_a: set[str] = set()
+    consumed_b: set[str] = set()
+
+    for bid in shared_ids:
+        if bid in exact_common_banned_ids:
+            continue
+        entries_a = idx_a[bid]
+        entries_b = idx_b[bid]
+        best_a = max(entries_a, key=lambda e: e.get("times banned", 0))
+        best_b = max(entries_b, key=lambda e: e.get("times banned", 0))
+        merged_entry = _aggregate_ban(best_a, best_b)
+        merged_hash = "agg_" + str(bid)
+        aggregated[merged_hash] = merged_entry
+        for e in entries_a:
+            consumed_a.add(entry_hash(e))
+        for e in entries_b:
+            consumed_b.add(entry_hash(e))
+
+    only_a = (keys_a - keys_b) - consumed_a
+    only_b = (keys_b - keys_a) - consumed_b
+
+    return SectionDiff(
+        hash_a=ha,
+        hash_b=hb,
+        common=exact_common,
+        only_a=only_a,
+        only_b=only_b,
+        aggregated=aggregated,
+    )
+
+
 # ── Palette ───────────────────────────────────────────────────────────────────
 
 BG           = "#1e1e2e"
@@ -75,6 +151,7 @@ GREEN_BG     = "#1a2e1a"
 RED          = "#f38ba8"
 RED_BG       = "#2e1a1a"
 YELLOW       = "#f9e2af"
+YELLOW_BG    = "#2e2a1a"
 SURFACE      = "#313244"
 OVERLAY      = "#45475a"
 BORDER       = "#585b70"
@@ -229,9 +306,10 @@ class MergeTool(tk.Tk):
         filters.pack(side="right")
         ttk.Label(filters, text="Filter:", style="Stat.TLabel").pack(side="left", padx=(0, 6))
         self.filter_buttons: dict[str, ttk.Button] = {}
-        for filt in ("all", "common", "only_a", "only_b"):
+        for filt in ("all", "common", "only_a", "only_b", "aggregated"):
             label = {"all": "All", "common": "Common",
-                     "only_a": "Only A", "only_b": "Only B"}[filt]
+                     "only_a": "Only A", "only_b": "Only B",
+                     "aggregated": "Aggregated"}[filt]
             btn = ttk.Button(filters, text=label,
                              command=lambda f=filt: self._set_filter(f))
             btn.pack(side="left", padx=2)
@@ -285,6 +363,7 @@ class MergeTool(tk.Tk):
         self.tree.tag_configure("common", background=BG_LIGHTER, foreground=FG)
         self.tree.tag_configure("only_a", background=RED_BG, foreground=RED)
         self.tree.tag_configure("only_b", background=GREEN_BG, foreground=GREEN)
+        self.tree.tag_configure("aggregated", background=YELLOW_BG, foreground=YELLOW)
 
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
 
@@ -315,6 +394,7 @@ class MergeTool(tk.Tk):
         self.detail_text.tag_configure("origin_a", foreground=RED)
         self.detail_text.tag_configure("origin_b", foreground=GREEN)
         self.detail_text.tag_configure("origin_common", foreground=FG_DIM)
+        self.detail_text.tag_configure("origin_aggregated", foreground=YELLOW)
 
     # ── Bottom bar ────────────────────────────────────────────────────────
 
@@ -369,7 +449,7 @@ class MergeTool(tk.Tk):
             self.data_a.get("roles", []),
             self.data_b.get("roles", []),
         )
-        self.bans_diff = compute_diff(
+        self.bans_diff = compute_bans_diff(
             self.data_a.get("bans", []),
             self.data_b.get("bans", []),
         )
@@ -390,10 +470,11 @@ class MergeTool(tk.Tk):
                      f"{len(rd.common) + len(rd.only_a) + len(rd.only_b)} total")
         if self.bans_diff:
             bd = self.bans_diff
+            total = len(bd.common) + len(bd.only_a) + len(bd.only_b) + len(bd.aggregated)
             self.lbl_bans_stats.config(
                 text=f"Bans:   {len(bd.common)} common  ·  "
                      f"{len(bd.only_a)} only-A  ·  {len(bd.only_b)} only-B  ·  "
-                     f"{len(bd.common) + len(bd.only_a) + len(bd.only_b)} total")
+                     f"{len(bd.aggregated)} aggregated  ·  {total} total")
 
     # ── Section / filter switching ────────────────────────────────────────
 
@@ -455,14 +536,14 @@ class MergeTool(tk.Tk):
             self.tree.column(c, width=widths[c], minwidth=60)
 
         hashes_to_show = self._filtered_hashes(diff)
-        all_entries: dict[str, dict] = {**diff.hash_a, **diff.hash_b}
+        all_entries: dict[str, dict] = {**diff.hash_a, **diff.hash_b, **diff.aggregated}
 
         rows: list[tuple[str, tuple, str]] = []
         for h in hashes_to_show:
             entry = all_entries[h]
             tag = self._category_tag(h, diff)
             status_label = {"common": "Common", "only_a": "Only A",
-                            "only_b": "Only B"}[tag]
+                            "only_b": "Only B", "aggregated": "Aggregated"}[tag]
             short_hash = h[:16] + "…"
 
             if self.active_section == "roles":
@@ -520,16 +601,23 @@ class MergeTool(tk.Tk):
         self._refresh_table()
 
     def _filtered_hashes(self, diff: SectionDiff) -> set[str]:
+        agg_keys = set(diff.aggregated.keys())
         if self.active_filter == "all":
-            return diff.common | diff.only_a | diff.only_b
+            return diff.common | diff.only_a | diff.only_b | agg_keys
         if self.active_filter == "common":
             return diff.common
         if self.active_filter == "only_a":
             return diff.only_a
+        if self.active_filter == "only_b":
+            return diff.only_b
+        if self.active_filter == "aggregated":
+            return agg_keys
         return diff.only_b
 
     @staticmethod
     def _category_tag(h: str, diff: SectionDiff) -> str:
+        if h in diff.aggregated:
+            return "aggregated"
         if h in diff.common:
             return "common"
         if h in diff.only_a:
@@ -547,7 +635,7 @@ class MergeTool(tk.Tk):
         if diff is None:
             return
 
-        entry = diff.hash_a.get(h) or diff.hash_b.get(h)
+        entry = diff.aggregated.get(h) or diff.hash_a.get(h) or diff.hash_b.get(h)
         if entry is None:
             return
 
@@ -556,6 +644,7 @@ class MergeTool(tk.Tk):
             "common": ("Common to both files", "origin_common"),
             "only_a": ("Only in File A", "origin_a"),
             "only_b": ("Only in File B", "origin_b"),
+            "aggregated": ("Aggregated (times banned summed)", "origin_aggregated"),
         }
         origin_text, origin_tag = origin_map[tag]
 
@@ -616,8 +705,8 @@ class MergeTool(tk.Tk):
         if not path:
             return
 
-        merged_roles = self._merged_entries(self.roles_diff)
-        merged_bans = self._merged_entries(self.bans_diff)
+        merged_roles = self._merged_entries(self.roles_diff, "ssrl")
+        merged_bans = self._merged_entries(self.bans_diff, "sban")
 
         merged = {
             "bbmeta": (self.data_a or {}).get(
@@ -636,10 +725,23 @@ class MergeTool(tk.Tk):
             f"Path: {path}")
 
     @staticmethod
-    def _merged_entries(diff: SectionDiff) -> list[dict]:
+    def _merged_entries(diff: SectionDiff, bbmeta_prefix: str) -> list[dict]:
         all_hashes = diff.common | diff.only_a | diff.only_b
         merged: dict[str, dict] = {**diff.hash_a, **diff.hash_b}
-        return [merged[h] for h in sorted(all_hashes)]
+        result = [merged[h] for h in sorted(all_hashes)]
+        result.extend(diff.aggregated[k] for k in sorted(diff.aggregated))
+
+        clean: list[dict] = []
+        for entry in result:
+            e = {k: v for k, v in entry.items() if k != "bbmeta"}
+            clean.append(e)
+
+        if clean:
+            first = {"bbmeta": f"{bbmeta_prefix} v0 n{len(clean)}"}
+            first.update(clean[0])
+            clean[0] = first
+
+        return clean
 
     def _export_report(self):
         if not self.roles_diff or not self.bans_diff:
@@ -663,6 +765,7 @@ class MergeTool(tk.Tk):
             lines.append(f"  Common: {len(diff.common)}")
             lines.append(f"  Only A: {len(diff.only_a)}")
             lines.append(f"  Only B: {len(diff.only_b)}")
+            lines.append(f"  Aggregated: {len(diff.aggregated)}")
             lines.append("")
 
             if diff.only_a:
@@ -677,6 +780,13 @@ class MergeTool(tk.Tk):
                 for h in sorted(diff.only_b):
                     lines.append(f"  [{h[:16]}]  "
                                  f"{json.dumps(diff.hash_b[h], separators=(',', ': '))}")
+                lines.append("")
+
+            if diff.aggregated:
+                lines.append(f"  *** Aggregated (times banned summed) ***")
+                for h in sorted(diff.aggregated):
+                    lines.append(f"  [{h}]  "
+                                 f"{json.dumps(diff.aggregated[h], separators=(',', ': '))}")
                 lines.append("")
 
         with open(path, "w", encoding="utf-8") as f:
